@@ -12,11 +12,68 @@ const checked=(r)=>{if(r.error)throw r.error;return r.data;};
 const admin=()=>profile?.active&&profile.role==='admin';
 function field(form,label,name,type='text',options){const l=el('label',label),x=el(options?'select':'input');x.name=name;if(options)options.forEach(v=>{const o=el('option',v);o.value=v;x.append(o);});else x.type=type;x.required=true;l.append(x);form.append(l);return x;}
 openScreen=function(screen,push=true){original(screen,push);const version=++viewVersion;if(!profile?.active)return;if(screen==='settings'){settings();return;}
-if(screen.startsWith('operacao/')||(screen.startsWith('setor/')&&screen!=='setor/Baixa Tensão')||screen==='search'){
-content.replaceChildren();let input;
-if(screen==='search'){input=el('input');input.placeholder='Buscar desenho, vídeo ou IT';input.setAttribute('aria-label','Buscar documentos');content.append(input);}
+if(screen.startsWith('operacao/')||(screen.startsWith('setor/')&&screen!=='setor/Baixa Tensão')||screen==='search'||screen==='mine'){
+content.replaceChildren();
+const filters=el('div',null,'admin-form');
+let input,sectorFilter,typeFilter,operationFilter;
+if(screen==='search'||screen==='mine'){
+input=el('input');input.placeholder='Buscar pelo título, setor ou operação';input.setAttribute('aria-label','Buscar documentos');filters.append(input);
+}
+if(screen==='mine'){
+heading.textContent='Meus favoritos';
+sectorFilter=field(filters,'Setor','sector','text',['Todos os setores']);
+operationFilter=field(filters,'Operação','operation','text',['Todas as operações']);
+typeFilter=field(filters,'Tipo','type','text',['Todos os tipos','it','desenho','video']);
+}
+content.append(filters);
+const status=el('p');status.setAttribute('role','status');content.append(status);
 const list=el('div');content.append(list);
-(async()=>{try{let q=db.from('documents').select('*').order('created_at',{ascending:false});if(screen.startsWith('operacao/'))q=q.eq('sector','Baixa Tensão').eq('operation',screen.slice(9));else if(screen.startsWith('setor/'))q=q.eq('sector',screen.slice(6));const docs=checked(await q);if(version!==viewVersion)return;const render=()=>{list.replaceChildren();const filtered=docs.filter(d=>!input||`${d.title} ${d.sector} ${d.operation}`.toLocaleLowerCase('pt-BR').includes(input.value.toLocaleLowerCase('pt-BR')));if(!filtered.length)list.append(el('p','Nenhum documento encontrado.','empty'));filtered.forEach(d=>{const row=el('div',null,'document-row');row.append(el('strong',d.title),el('span',`${d.type} · ${d.operation}`),button('Visualizar',()=>showDocument(d)));list.append(row);});};if(input)input.oninput=render;render();}catch(e){if(version===viewVersion)fail(e);}})();
+(async()=>{try{
+const owner=user.id;
+let q=db.from('documents').select('*').order('created_at',{ascending:false});
+if(screen.startsWith('operacao/'))q=q.eq('sector','Baixa Tensão').eq('operation',screen.slice(9));
+else if(screen.startsWith('setor/'))q=q.eq('sector',screen.slice(6));
+const results=await Promise.all([q,db.from('document_favorites').select('document_id').eq('user_id',owner)]);
+const docs=checked(results[0]);
+const favorites=new Set(checked(results[1]).map(f=>f.document_id));
+if(version!==viewVersion||user?.id!==owner)return;
+if(screen==='mine'){
+const addOptions=(target,values)=>values.forEach(v=>{const o=el('option',v);o.value=v;target.append(o);});
+const favoriteDocs=docs.filter(d=>favorites.has(d.id));
+addOptions(sectorFilter,[...new Set(favoriteDocs.map(d=>d.sector))].sort());
+addOptions(operationFilter,[...new Set(favoriteDocs.map(d=>d.operation))].sort());
+}
+const render=()=>{
+if(version!==viewVersion||user?.id!==owner)return;
+list.replaceChildren();
+const filtered=docs.filter(d=>(screen!=='mine'||favorites.has(d.id))&&
+(!input||`${d.title} ${d.sector} ${d.operation}`.toLocaleLowerCase('pt-BR').includes(input.value.toLocaleLowerCase('pt-BR')))&&
+(!sectorFilter||sectorFilter.value==='Todos os setores'||d.sector===sectorFilter.value)&&
+(!operationFilter||operationFilter.value==='Todas as operações'||d.operation===operationFilter.value)&&
+(!typeFilter||typeFilter.value==='Todos os tipos'||d.type===typeFilter.value));
+if(!filtered.length)list.append(el('p',screen==='mine'?(favorites.size?'Nenhum favorito corresponde aos filtros.':'Você ainda não tem favoritos. Abra Setores ou Buscar e clique em ☆ Favoritar.'):'Nenhum documento encontrado.','empty'));
+filtered.forEach(d=>{
+const row=el('div',null,'document-row');
+const star=button(favorites.has(d.id)?'★ Favoritado':'☆ Favoritar',async()=>{
+star.disabled=true;status.textContent='Salvando…';
+try{
+const remove=favorites.has(d.id);
+const result=remove?await db.from('document_favorites').delete().eq('user_id',owner).eq('document_id',d.id):await db.from('document_favorites').upsert({user_id:owner,document_id:d.id},{onConflict:'user_id,document_id',ignoreDuplicates:true});
+checked(result);
+if(version!==viewVersion||user?.id!==owner)return;
+if(remove)favorites.delete(d.id);else favorites.add(d.id);
+status.textContent=remove?'Documento retirado dos favoritos.':'Documento salvo nos favoritos.';
+render();
+}catch(e){if(version===viewVersion){status.textContent='Não foi possível salvar o favorito. '+(e.message||'Tente novamente.');star.disabled=false;}}
+});
+star.setAttribute('aria-pressed',String(favorites.has(d.id)));
+star.setAttribute('aria-label',`${favorites.has(d.id)?'Remover dos favoritos':'Favoritar'}: ${d.title}`);
+row.append(el('strong',d.title),el('span',`${d.type} · ${d.sector} · ${d.operation}`),button('Visualizar',()=>showDocument(d)),star);list.append(row);
+});};
+if(input)input.oninput=render;
+[sectorFilter,typeFilter,operationFilter].filter(Boolean).forEach(f=>f.onchange=render);
+render();
+}catch(e){if(version===viewVersion)fail(e);}})();
 }};
 async function showDocument(doc){try{checked(await db.from('profiles').select('active').eq('id',user.id).single());const {signedUrl}=checked(await db.storage.from('brasformer').createSignedUrl(doc.file_path,300));const dialog=el('dialog');dialog.append(el('h3',doc.title),button('Fechar',()=>dialog.close()));let viewer;if(doc.type==='video'){viewer=el('video');viewer.controls=true;viewer.setAttribute('controlsList','nodownload');viewer.disablePictureInPicture=true;}else if(/\.(png|jpe?g|webp)$/i.test(doc.file_path)){viewer=el('img');viewer.alt=doc.title;}else{viewer=el('iframe');viewer.title=doc.title;}viewer.src=signedUrl;dialog.append(viewer);document.body.append(dialog);dialog.onclose=()=>{if(viewer.tagName==='VIDEO')viewer.pause();viewer.removeAttribute('src');dialog.remove();};dialog.showModal();}catch(e){fail(e);}}
 function settings(){content.replaceChildren();const size=button('Alternar tamanho do texto',()=>{document.body.classList.toggle('large');localStorage.setItem('it-digital-large',String(document.body.classList.contains('large')));});content.append(size);if(!admin()){content.append(el('p','Seu acesso permite apenas visualizar os documentos.','notice'));return;}

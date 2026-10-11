@@ -76,8 +76,78 @@ render();
 }catch(e){if(version===viewVersion)fail(e);}})();
 }};
 async function showDocument(doc){try{checked(await db.from('profiles').select('active').eq('id',user.id).single());const {signedUrl}=checked(await db.storage.from('brasformer').createSignedUrl(doc.file_path,300));const dialog=el('dialog');dialog.append(el('h3',doc.title),button('Fechar',()=>dialog.close()));let viewer;if(doc.type==='video'){viewer=el('video');viewer.controls=true;viewer.setAttribute('controlsList','nodownload');viewer.disablePictureInPicture=true;}else if(/\.(png|jpe?g|webp)$/i.test(doc.file_path)){viewer=el('img');viewer.alt=doc.title;}else{viewer=el('iframe');viewer.title=doc.title;}viewer.src=signedUrl;dialog.append(viewer);document.body.append(dialog);dialog.onclose=()=>{if(viewer.tagName==='VIDEO')viewer.pause();viewer.removeAttribute('src');dialog.remove();};dialog.showModal();}catch(e){fail(e);}}
-function settings(){content.replaceChildren();const size=button('Alternar tamanho do texto',()=>{document.body.classList.toggle('large');localStorage.setItem('it-digital-large',String(document.body.classList.contains('large')));});content.append(size);if(!admin()){content.append(el('p','Seu acesso permite apenas visualizar os documentos.','notice'));return;}
-content.append(el('h3','Enviar desenho, vídeo ou IT'));const form=el('form',null,'admin-form');field(form,'Título','title');const sector=field(form,'Setor','sector','text',sectors.map(s=>s[0]));const operation=field(form,'Operação','operation','text',['Bobinagem secundária','Bobinagem primária','Montagem','Teste','Acabamento']);sector.onchange=()=>{operation.replaceChildren();(sector.value==='Baixa Tensão'?['Bobinagem secundária','Bobinagem primária','Montagem','Teste','Acabamento']:['Geral']).forEach(v=>{const o=el('option',v);o.value=v;operation.append(o);});};field(form,'Tipo','type','text',['desenho','video','it']);const file=field(form,'Arquivo — PDF, imagem ou vídeo (até 50 MB)','file','file');file.accept='.pdf,.png,.jpg,.jpeg,.webp,.mp4,.webm';const submit=el('button','Enviar arquivo','action');form.append(submit);const status=el('p');status.setAttribute('role','status');form.append(status);form.onsubmit=async ev=>{ev.preventDefault();submit.disabled=true;status.textContent='Enviando…';let path;try{const f=file.files[0];if(!f||f.size>50*1024*1024)throw Error('Escolha um arquivo de até 50 MB.');const ext=f.name.split('.').pop().toLowerCase();if(!['pdf','png','jpg','jpeg','webp','mp4','webm'].includes(ext))throw Error('Formato não permitido.');const kind=form.elements.type.value;if((kind==='video')!==['mp4','webm'].includes(ext))throw Error('Selecione Vídeo para MP4/WebM; desenhos e ITs devem ser PDF ou imagem.');path=`${crypto.randomUUID()}.${ext}`;checked(await db.storage.from('brasformer').upload(path,f,{upsert:false}));const result=await db.from('documents').insert({title:form.elements.title.value.trim(),sector:sector.value,operation:operation.value,type:kind,file_path:path,created_by:user.id});if(result.error){await db.storage.from('brasformer').remove([path]);throw result.error;}status.textContent='Arquivo enviado com sucesso.';form.reset();sector.onchange();await manageDocuments();}catch(e){status.textContent=e.message||'Falha no envio.';}finally{submit.disabled=false;}};content.append(form);
+// Pastas organizam o catálogo; os arquivos privados mantêm seu endereço.
+function folderPath(folders,id){
+const names=[],seen=new Set();
+while(id){if(seen.has(id))break;seen.add(id);const f=folders.find(x=>x.id===id);if(!f)break;names.unshift(f.name);id=f.parent_id;}
+return names.join(' / ');
+}
+function folderOptions(select,folders,selected=null){
+select.replaceChildren();const root=el('option','Sem pasta (raiz)');root.value='';select.append(root);
+folders.map(f=>({id:f.id,path:folderPath(folders,f.id)})).sort((a,b)=>a.path.localeCompare(b.path,'pt-BR')).forEach(f=>{const o=el('option',f.path);o.value=f.id;select.append(o);});
+select.value=selected||'';
+}
+function explorer(host,uploadSelect=null){
+const owner=user.id,version=viewVersion;
+let folders=[],docs=[],favorites=new Set(),currentFolder=null,loadVersion=0;
+const valid=()=>version===viewVersion&&user?.id===owner;
+const box=el('section');box.setAttribute('aria-label','Explorador de arquivos');
+box.append(el('h3','Explorador de arquivos'));
+const toolbar=el('div',null,'document-row'),crumbs=el('nav'),status=el('p'),list=el('div');
+crumbs.setAttribute('aria-label','Caminho da pasta');status.setAttribute('role','status');
+const search=el('input');search.placeholder='Buscar pasta ou documento em todo o explorador';search.setAttribute('aria-label','Buscar no explorador');search.style.width='100%';
+box.append(toolbar,crumbs,search,status,list);host.append(box);
+const notify=e=>{if(valid())status.textContent=e.code==='23505'?'Já existe uma pasta com esse nome neste local.':e.code==='23503'?'A pasta contém arquivos ou subpastas. Mova o conteúdo antes de excluir.':(e.message||'Não foi possível concluir a ação.');};
+async function load(){const request=++loadVersion;try{
+const results=await Promise.all([db.from('document_folders').select('*').order('name'),db.from('documents').select('*').order('title'),db.from('document_favorites').select('document_id').eq('user_id',owner)]);
+const nextFolders=checked(results[0]),nextDocs=checked(results[1]),nextFavs=checked(results[2]);
+if(!valid()||request!==loadVersion)return;
+folders=nextFolders;docs=nextDocs;favorites=new Set(nextFavs.map(x=>x.document_id));
+if(currentFolder&&!folders.some(f=>f.id===currentFolder))currentFolder=null;
+if(uploadSelect)folderOptions(uploadSelect,folders,uploadSelect.value);
+render();
+}catch(e){if(valid()&&request===loadVersion)notify(e);}}
+function navigate(id){currentFolder=id;search.value='';status.textContent='';render();}
+async function createFolder(parent){const name=prompt(parent?'Nome da subpasta:':'Nome da pasta raiz:');if(name===null)return;const clean=name.trim();if(!clean||clean.length>120||/[\\/]/.test(clean)){status.textContent='Use um nome de 1 a 120 caracteres, sem barras.';return;}
+try{checked(await db.from('document_folders').insert({name:clean,parent_id:parent}));status.textContent='Pasta criada.';await load();}catch(e){notify(e);}}
+function moveDocument(doc){
+const dialog=el('dialog'),form=el('form',null,'admin-form'),label=el('label','Pasta de destino'),select=el('select');select.setAttribute('aria-label','Pasta de destino');folderOptions(select,folders,doc.folder_id);label.append(select);form.append(label);
+const save=el('button','Mover arquivo','action');save.type='submit';const msg=el('p');msg.setAttribute('role','status');form.append(save,button('Cancelar',()=>dialog.close()),msg);
+dialog.append(el('h3',`Mover: ${doc.title}`),form);document.body.append(dialog);dialog.onclose=()=>dialog.remove();
+form.onsubmit=async e=>{e.preventDefault();save.disabled=true;try{checked(await db.from('documents').update({folder_id:select.value||null}).eq('id',doc.id));dialog.close();if(valid()){status.textContent='Arquivo movido.';await load();}}catch(err){msg.textContent=err.message||'Não foi possível mover.';save.disabled=false;}};dialog.showModal();
+}
+function render(){if(!valid())return;toolbar.replaceChildren();crumbs.replaceChildren();list.replaceChildren();
+if(admin()){
+toolbar.append(button('＋ Nova pasta raiz',()=>createFolder(null)));
+if(currentFolder)toolbar.append(button('＋ Nova subpasta',()=>createFolder(currentFolder)));
+if(uploadSelect)toolbar.append(button('Enviar arquivo aqui',()=>{uploadSelect.value=currentFolder||'';uploadSelect.scrollIntoView({behavior:'smooth',block:'center'});uploadSelect.focus();}));
+}
+toolbar.append(button('Atualizar pastas',()=>load()));
+crumbs.append(button('Todas as pastas',()=>navigate(null)));
+if(currentFolder){const chain=[],seen=new Set();let id=currentFolder;while(id&&!seen.has(id)){seen.add(id);const f=folders.find(x=>x.id===id);if(!f)break;chain.unshift(f);id=f.parent_id;}chain.forEach(f=>{crumbs.append(el('span',' / '),button(f.name,()=>navigate(f.id)));});}
+const query=search.value.trim().toLocaleLowerCase('pt-BR');
+const matches=text=>text.toLocaleLowerCase('pt-BR').includes(query);
+const visibleFolders=folders.filter(f=>query?matches(folderPath(folders,f.id)):f.parent_id===currentFolder);
+visibleFolders.forEach(f=>{
+const row=el('div',null,'document-row');row.append(button(`📁 ${f.name}`,()=>navigate(f.id)),el('span',query?folderPath(folders,f.id):'Pasta'));
+if(admin()){
+row.append(button('Renomear pasta',async()=>{const name=prompt('Novo nome da pasta:',f.name);if(name===null)return;const clean=name.trim();if(!clean||clean.length>120||/[\\/]/.test(clean)){status.textContent='Nome inválido.';return;}try{checked(await db.from('document_folders').update({name:clean}).eq('id',f.id));status.textContent='Pasta renomeada.';await load();}catch(e){notify(e);}}));
+const hasContent=folders.some(x=>x.parent_id===f.id)||docs.some(d=>d.folder_id===f.id);
+const remove=button('Excluir pasta vazia',async()=>{if(!confirm(`Excluir a pasta vazia "${f.name}"?`))return;try{checked(await db.from('document_folders').delete().eq('id',f.id));status.textContent='Pasta excluída.';await load();}catch(e){notify(e);}},'danger');remove.disabled=hasContent;remove.title=hasContent?'Mova os arquivos e remova as subpastas primeiro.':'Excluir pasta vazia';row.append(remove);
+}list.append(row);});
+const visibleDocs=docs.filter(d=>query?matches(`${d.title} ${folderPath(folders,d.folder_id)} ${d.sector} ${d.operation}`):(d.folder_id||null)===currentFolder);
+visibleDocs.forEach(d=>{
+const row=el('div',null,'document-row');row.append(el('strong',d.title),el('span',`${d.type} · ${d.sector} · ${d.operation}${query?' · '+(folderPath(folders,d.folder_id)||'Sem pasta'):''}`),button('Visualizar',()=>showDocument(d)));
+const star=button(favorites.has(d.id)?'★ Favoritado':'☆ Favoritar',async()=>{star.disabled=true;try{const remove=favorites.has(d.id);checked(remove?await db.from('document_favorites').delete().eq('user_id',owner).eq('document_id',d.id):await db.from('document_favorites').upsert({user_id:owner,document_id:d.id},{onConflict:'user_id,document_id',ignoreDuplicates:true}));if(valid()){if(remove)favorites.delete(d.id);else favorites.add(d.id);status.textContent=remove?'Favorito removido.':'Favorito salvo.';render();}}catch(e){notify(e);star.disabled=false;}});star.setAttribute('aria-pressed',String(favorites.has(d.id)));star.setAttribute('aria-label',`${favorites.has(d.id)?'Remover dos favoritos':'Favoritar'}: ${d.title}`);row.append(star);
+if(admin())row.append(button('Mover arquivo',()=>moveDocument(d)));list.append(row);
+});
+if(!visibleFolders.length&&!visibleDocs.length)list.append(el('p',query?'Nenhum resultado encontrado.':currentFolder?'Esta pasta está vazia.':'Nenhuma pasta ou arquivo sem pasta. Crie uma pasta raiz para começar.','empty'));
+}
+search.oninput=render;load();return {refresh:load};
+}
+
+function settings(){content.replaceChildren();const size=button('Alternar tamanho do texto',()=>{document.body.classList.toggle('large');localStorage.setItem('it-digital-large',String(document.body.classList.contains('large')));});content.append(size);const explorerHost=el('div');content.append(explorerHost);if(!admin()){explorer(explorerHost);content.append(el('p','Seu acesso permite navegar, visualizar e favoritar os documentos.','notice'));return;}
+content.append(el('h3','Enviar desenho, vídeo ou IT'));const form=el('form',null,'admin-form');field(form,'Título','title');const folderLabel=el('label','Pasta de destino'),folderSelect=el('select');folderSelect.name='folder_id';folderSelect.setAttribute('aria-label','Pasta de destino para upload');folderOptions(folderSelect,[]);folderLabel.append(folderSelect);form.append(folderLabel);const fileExplorer=explorer(explorerHost,folderSelect);const sector=field(form,'Setor','sector','text',sectors.map(s=>s[0]));const operation=field(form,'Operação','operation','text',['Bobinagem secundária','Bobinagem primária','Montagem','Teste','Acabamento']);sector.onchange=()=>{operation.replaceChildren();(sector.value==='Baixa Tensão'?['Bobinagem secundária','Bobinagem primária','Montagem','Teste','Acabamento']:['Geral']).forEach(v=>{const o=el('option',v);o.value=v;operation.append(o);});};field(form,'Tipo','type','text',['desenho','video','it']);const file=field(form,'Arquivo — PDF, imagem ou vídeo (até 50 MB)','file','file');file.accept='.pdf,.png,.jpg,.jpeg,.webp,.mp4,.webm';const submit=el('button','Enviar arquivo','action');form.append(submit);const status=el('p');status.setAttribute('role','status');form.append(status);form.onsubmit=async ev=>{ev.preventDefault();submit.disabled=true;status.textContent='Enviando…';let path;try{const f=file.files[0];if(!f||f.size>50*1024*1024)throw Error('Escolha um arquivo de até 50 MB.');const ext=f.name.split('.').pop().toLowerCase();if(!['pdf','png','jpg','jpeg','webp','mp4','webm'].includes(ext))throw Error('Formato não permitido.');const kind=form.elements.type.value;if((kind==='video')!==['mp4','webm'].includes(ext))throw Error('Selecione Vídeo para MP4/WebM; desenhos e ITs devem ser PDF ou imagem.');path=`${crypto.randomUUID()}.${ext}`;checked(await db.storage.from('brasformer').upload(path,f,{upsert:false}));const result=await db.from('documents').insert({title:form.elements.title.value.trim(),sector:sector.value,operation:operation.value,type:kind,file_path:path,created_by:user.id,folder_id:folderSelect.value||null});if(result.error){await db.storage.from('brasformer').remove([path]);throw result.error;}status.textContent='Arquivo enviado com sucesso.';const savedFolder=folderSelect.value;form.reset();folderSelect.value=savedFolder;sector.onchange();await manageDocuments();await fileExplorer.refresh();}catch(e){status.textContent=e.message||'Falha no envio.';}finally{submit.disabled=false;}};content.append(form);
 content.append(el('h3','Conteúdos cadastrados'));const docs=el('div');docs.id='admin-documents';content.append(docs);manageDocuments();
 content.append(el('h3','Criar acesso de funcionário'));const uf=el('form',null,'admin-form');field(uf,'E-mail','email','email');const pw=field(uf,'Senha inicial (mínimo 12 caracteres)','password','password');pw.minLength=12;const create=el('button','Criar usuário','action');uf.append(create);const us=el('p');us.setAttribute('role','status');uf.append(us);uf.onsubmit=async ev=>{ev.preventDefault();create.disabled=true;us.textContent='Criando…';try{const data=checked(await db.functions.invoke('itdigital-users',{body:{email:uf.elements.email.value.trim(),password:pw.value}}));if(data?.error)throw Error(data.error);uf.reset();us.textContent='Usuário criado e liberado para visualizar.';await manageUsers();}catch(e){us.textContent='Não foi possível criar o usuário. Confira se a função itdigital-users foi implantada no Supabase. '+(e.message||'');}finally{create.disabled=false;}};content.append(uf);
 content.append(el('h3','Liberar ou bloquear usuários'));const users=el('div');users.id='admin-users';content.append(users);manageUsers();}

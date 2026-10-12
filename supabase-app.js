@@ -156,7 +156,53 @@ area.append(button('Vincular vídeo já cadastrado',async()=>{try{const availabl
 }reload();
 }
 
-async function showDocument(doc){try{checked(await db.from('profiles').select('active').eq('id',user.id).single());const {signedUrl}=checked(await db.storage.from('brasformer').createSignedUrl(doc.file_path,300));const dialog=el('dialog');dialog.append(el('h3',doc.title),button('Fechar',()=>dialog.close()));let viewer;if(doc.type==='video'){viewer=el('video');viewer.controls=true;viewer.setAttribute('controlsList','nodownload');viewer.disablePictureInPicture=true;}else if(/\.(png|jpe?g|webp)$/i.test(doc.file_path)){viewer=el('img');viewer.alt=doc.title;}else{viewer=el('iframe');viewer.title=doc.title;}viewer.src=signedUrl;dialog.append(viewer);if(doc.type==='it')itVideoTools(dialog,doc);document.body.append(dialog);dialog.onclose=()=>{if(viewer.tagName==='VIDEO')viewer.pause();viewer.removeAttribute('src');dialog.remove();};dialog.showModal();}catch(e){fail(e);}}
+let pdfLibraryPromise;
+function loadPdfLibrary(){
+if(!pdfLibraryPromise)pdfLibraryPromise=import('https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/legacy/build/pdf.mjs').then(lib=>{lib.GlobalWorkerOptions.workerSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/legacy/build/pdf.worker.mjs';return lib;}).catch(e=>{pdfLibraryPromise=null;throw e;});
+return pdfLibraryPromise;
+}
+function pdfMobileViewer(host,url,dialog){
+const controls=el('div',null,'pdf-controls'),pages=el('div',null,'pdf-pages'),status=el('p');status.setAttribute('role','status');status.textContent='Carregando páginas da IT…';
+const select=el('select');select.setAttribute('aria-label','Página da IT');select.disabled=true;
+let pdf=null,task=null,observer=null,closed=false,currentPage=1,busy=Promise.resolve();const entries=[],rendered=new Map();
+const prev=button('← Anterior',()=>jump(currentPage-1)),next=button('Próxima →',()=>jump(currentPage+1));prev.disabled=true;next.disabled=true;
+controls.append(prev,select,next);host.append(controls,status,pages);
+function jump(n){if(!pdf)return;currentPage=Math.max(1,Math.min(pdf.numPages,n));select.value=String(currentPage);prev.disabled=currentPage===1;next.disabled=currentPage===pdf.numPages;entries[currentPage-1].scrollIntoView({behavior:'smooth',block:'start'});enqueue(currentPage);}
+select.onchange=()=>jump(Number(select.value));
+function trackScroll(){if(!pdf||closed)return;const top=dialog.getBoundingClientRect().top+80;const visible=entries.find(p=>p.getBoundingClientRect().bottom>top);if(!visible)return;currentPage=Number(visible.dataset.page);select.value=String(currentPage);prev.disabled=currentPage===1;next.disabled=currentPage===pdf.numPages;enqueue(currentPage);}
+dialog.addEventListener('scroll',trackScroll,{passive:true});
+async function renderPage(n){if(closed||rendered.has(n))return;const card=entries[n-1];if(!card)return;const page=await pdf.getPage(n);if(closed)return;
+const base=page.getViewport({scale:1}),width=Math.max(200,Math.min(host.clientWidth||320,1100)-20),scale=width/base.width,dpr=Math.min(window.devicePixelRatio||1,2);const viewport=page.getViewport({scale:scale*dpr});const canvas=el('canvas');canvas.setAttribute('aria-label',`Página ${n} da IT`);canvas.width=Math.ceil(viewport.width);canvas.height=Math.ceil(viewport.height);canvas.style.width='100%';canvas.style.height='auto';
+card.replaceChildren(el('p',`Página ${n} de ${pdf.numPages}`,'pdf-page-caption'),canvas);const renderTask=page.render({canvasContext:canvas.getContext('2d'),viewport});task=renderTask;await renderTask.promise;task=null;if(closed)return;rendered.set(n,canvas);page.cleanup();
+// Mantém no máximo seis páginas desenhadas para limitar memória no celular.
+if(rendered.size>6){const candidates=[...rendered.keys()].filter(k=>Math.abs(k-currentPage)>2).sort((a,b)=>Math.abs(b-currentPage)-Math.abs(a-currentPage));while(rendered.size>6&&candidates.length){const k=candidates.shift(),old=rendered.get(k);old.width=1;old.height=1;entries[k-1].replaceChildren(el('p',`Página ${k} de ${pdf.numPages}`,'pdf-page-caption'));rendered.delete(k);}}
+}
+function enqueue(n){busy=busy.then(()=>closed?null:renderPage(n)).catch(e=>{if(!closed)status.textContent='Não foi possível desenhar a página. '+e.message;});}
+(async()=>{try{const lib=await loadPdfLibrary();if(closed)return;const loading=lib.getDocument({url});task=loading;pdf=await loading.promise;task=null;if(closed){pdf.destroy();return;}
+const first=await pdf.getPage(1),base=first.getViewport({scale:1}),height=(Math.max(200,Math.min(host.clientWidth||320,1100)-20)/base.width)*base.height;
+for(let n=1;n<=pdf.numPages;n++){const option=el('option',`Página ${n} / ${pdf.numPages}`);option.value=String(n);select.append(option);const card=el('section',null,'pdf-page');card.style.minHeight=Math.ceil(height)+'px';card.dataset.page=String(n);card.append(el('p',`Página ${n} de ${pdf.numPages}`,'pdf-page-caption'));entries.push(card);pages.append(card);}
+select.disabled=false;next.disabled=pdf.numPages===1;status.textContent='Role para ver as próximas páginas ou use os botões acima.';
+if(typeof IntersectionObserver!=='undefined'){observer=new IntersectionObserver(events=>{for(const e of events){if(!e.isIntersecting)continue;const n=Number(e.target.dataset.page);enqueue(n);}}, {root:dialog,rootMargin:'400px 0px',threshold:0});entries.forEach(p=>observer.observe(p));}
+enqueue(1);
+
+}catch(e){if(!closed)status.textContent='Não foi possível abrir o PDF. Verifique a conexão e tente novamente. '+e.message;}})();
+return ()=>{closed=true;dialog.removeEventListener('scroll',trackScroll);observer?.disconnect();task?.cancel?.();task?.destroy?.();pdf?.destroy();rendered.forEach(c=>{c.width=1;c.height=1;});};
+}
+
+async function showDocument(doc){try{
+const access=checked(await db.from('profiles').select('active').eq('id',user.id).single());if(!access.active)throw Error('Seu acesso está bloqueado.');
+const {signedUrl}=checked(await db.storage.from('brasformer').createSignedUrl(doc.file_path,600));
+const dialog=el('dialog',null,'it-viewer-dialog'),head=el('div',null,'it-viewer-header');head.append(el('h3',doc.title),button('Fechar',()=>dialog.close()));dialog.append(head);
+let viewer,cleanup;
+if(doc.type==='video'){viewer=el('video');viewer.controls=true;viewer.setAttribute('controlsList','nodownload');viewer.disablePictureInPicture=true;viewer.src=signedUrl;dialog.append(viewer);}
+else if(/\.(png|jpe?g|webp)$/i.test(doc.file_path)){viewer=el('img');viewer.alt=doc.title;viewer.src=signedUrl;dialog.append(viewer);}
+else{viewer=el('div',null,'pdf-mobile-viewer');dialog.append(viewer);}
+if(doc.type==='it')itVideoTools(dialog,doc);
+document.body.append(dialog);dialog.showModal();
+if(viewer.className==='pdf-mobile-viewer')cleanup=pdfMobileViewer(viewer,signedUrl,dialog);
+dialog.onclose=()=>{cleanup?.();if(viewer.tagName==='VIDEO')viewer.pause();viewer.removeAttribute('src');dialog.remove();};
+}catch(e){fail(e);}}
+
 // Pastas organizam o catálogo; os arquivos privados mantêm seu endereço.
 function folderPath(folders,id){
 const names=[],seen=new Set();

@@ -11,7 +11,32 @@ const fail=(e)=>{console.error(e);const n=el('p',e.message||'Não foi possível 
 const checked=(r)=>{if(r.error)throw r.error;return r.data;};
 const admin=()=>profile?.active&&profile.role==='admin';
 function field(form,label,name,type='text',options){const l=el('label',label),x=el(options?'select':'input');x.name=name;if(options)options.forEach(v=>{const o=el('option',v);o.value=v;x.append(o);});else x.type=type;x.required=true;l.append(x);form.append(l);return x;}
-openScreen=function(screen,push=true){original(screen,push);const version=++viewVersion;if(!profile?.active)return;if(screen==='settings'){settings();return;}
+function productFolderIds(folders){
+const ids=new Set(folders.filter(f=>f.name.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLocaleLowerCase('pt-BR').includes('produto')).map(f=>f.id));
+let changed=true;while(changed){changed=false;folders.forEach(f=>{if(ids.has(f.parent_id)&&!ids.has(f.id)){ids.add(f.id);changed=true;}});}return ids;
+}
+async function productsScreen(version){
+content.replaceChildren();const status=el('p');status.setAttribute('role','status');status.textContent='Carregando produtos…';content.append(status);
+const owner=user.id;
+try{
+const results=await Promise.all([db.from('document_folders').select('*').order('name'),db.from('documents').select('*').is('parent_it_id',null).order('title'),db.from('document_favorites').select('document_id').eq('user_id',owner)]);
+const folders=checked(results[0]),docs=checked(results[1]),favorites=new Set(checked(results[2]).map(f=>f.document_id)),ids=productFolderIds(folders);
+if(version!==viewVersion||user?.id!==owner)return;
+let currentFolder=null;const crumbs=el('nav',null,'explorer-breadcrumbs'),list=el('div',null,'explorer-items explorer-icons');content.append(crumbs,list);status.textContent='';
+const navigate=id=>{currentFolder=id;status.textContent='';render();};
+const render=()=>{
+if(version!==viewVersion||user?.id!==owner)return;crumbs.replaceChildren();list.replaceChildren();crumbs.append(button('Produtos',()=>navigate(null)));
+if(currentFolder){const chain=[],seen=new Set();let id=currentFolder;while(id&&ids.has(id)&&!seen.has(id)){seen.add(id);const f=folders.find(x=>x.id===id);if(!f)break;chain.unshift(f);id=f.parent_id;}chain.forEach(f=>crumbs.append(el('span',' / '),button(f.name,()=>navigate(f.id))));}
+const shownFolders=folders.filter(f=>ids.has(f.id)&&(currentFolder?f.parent_id===currentFolder:!ids.has(f.parent_id)));
+shownFolders.forEach(f=>{const row=el('div',null,'explorer-item folder-item'),open=button('',()=>navigate(f.id),'explorer-open');open.setAttribute('aria-label','Abrir pasta de produtos: '+f.name);open.append(el('span','📁','file-icon'),el('strong',f.name));row.append(open);list.append(row);});
+const shownDocs=currentFolder?docs.filter(d=>d.folder_id===currentFolder):[];
+shownDocs.forEach(d=>{const row=el('div',null,'document-row');row.append(el('strong',d.title),button('Visualizar',()=>showDocument(d)));const star=button(favorites.has(d.id)?'★ Favoritado':'☆ Favoritar',async()=>{star.disabled=true;try{const remove=favorites.has(d.id);checked(remove?await db.from('document_favorites').delete().eq('user_id',owner).eq('document_id',d.id):await db.from('document_favorites').upsert({user_id:owner,document_id:d.id},{onConflict:'user_id,document_id',ignoreDuplicates:true}));if(version!==viewVersion||user?.id!==owner)return;if(remove)favorites.delete(d.id);else favorites.add(d.id);status.textContent=remove?'Favorito removido.':'Favorito salvo.';render();}catch(e){status.textContent=e.message;star.disabled=false;}});star.setAttribute('aria-pressed',String(favorites.has(d.id)));row.append(star);list.append(row);});
+if(!shownFolders.length&&!shownDocs.length)list.append(el('p',currentFolder?'Esta pasta de produtos está vazia.':'Crie no explorador uma pasta com “produto” no nome para aparecer aqui.','empty'));
+};render();
+}catch(e){if(version===viewVersion)status.textContent='Não foi possível carregar Produtos. '+e.message;}
+}
+
+openScreen=function(screen,push=true){original(screen,push);const version=++viewVersion;if(!profile?.active)return;if(screen==='settings'){settings();return;}if(screen==='products'){productsScreen(version);return;}
 if(screen.startsWith('operacao/')||(screen.startsWith('setor/')&&screen!=='setor/Baixa Tensão')||screen==='search'||screen==='mine'){
 content.replaceChildren();
 const filters=el('div',null,'admin-form');
@@ -33,8 +58,9 @@ const owner=user.id;
 let q=db.from('documents').select('*').is('parent_it_id',null).order('created_at',{ascending:false});
 if(screen.startsWith('operacao/'))q=q.eq('sector','Baixa Tensão').eq('operation',screen.slice(9));
 else if(screen.startsWith('setor/'))q=q.eq('sector',screen.slice(6));
-const results=await Promise.all([q,db.from('document_favorites').select('document_id').eq('user_id',owner)]);
-const docs=checked(results[0]);
+const results=await Promise.all([q,db.from('document_favorites').select('document_id').eq('user_id',owner),db.from('document_folders').select('*')]);
+const productIds=productFolderIds(checked(results[2]));
+const docs=checked(results[0]).filter(d=>screen==='mine'||!productIds.has(d.folder_id));
 const favorites=new Set(checked(results[1]).map(f=>f.document_id));
 if(version!==viewVersion||user?.id!==owner)return;
 if(screen==='mine'||screen==='search'){

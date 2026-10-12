@@ -146,6 +146,65 @@ if(newPaths.length){const r=await db.storage.from('brasformer').remove(newPaths)
 if(cleanup.length)throw Error(e.message+' Algumas cópias incompletas precisam ser removidas pelo administrador.');throw e;
 }
 }
+function videoEditor(doc,afterUpload){
+const dialog=el('dialog',null,'it-viewer-dialog'),form=el('div',null,'admin-form'),message=el('p'),output=el('div');message.setAttribute('role','status');
+const heading=el('div',null,'it-viewer-header');heading.append(el('h3','✂ Preparar vídeo para a IT'),button('Fechar',()=>{if(busy&&!cancelProcessing){message.textContent='Aguarde o envio das partes terminar antes de fechar.';return;}dialog.close();}));dialog.append(heading,el('p','Escolha um vídeo grande, defina o trecho e gere partes menores que 50 MB. O processamento ocorre no seu computador e leva aproximadamente o tempo do trecho. Mantenha esta aba aberta e visível.','notice'),form);
+const sourceLabel=el('label','Vídeo original (pode ter mais de 50 MB)'),source=el('input');source.type='file';source.accept='video/*';sourceLabel.append(source);form.append(sourceLabel);
+const preview=el('video');preview.controls=true;preview.playsInline=true;preview.preload='metadata';preview.style.width='100%';form.append(preview);
+const start=field(form,'Início do trecho (segundos)','start','number'),end=field(form,'Fim do trecho (segundos)','end','number');start.min='0';start.step=end.step='0.1';end.min='0';start.value='0';
+form.append(button('Definir início na posição atual',()=>{start.value=preview.currentTime.toFixed(1);}),button('Definir fim na posição atual',()=>{end.value=preview.currentTime.toFixed(1);}));
+const quality=field(form,'Qualidade / resolução','quality','text',['720p — qualidade padrão','480p — arquivo menor','360p — mais compacto']);
+const limit=field(form,'Tamanho máximo por parte (MB, até 48)','limit','number');limit.min='5';limit.max='48';limit.value='45';
+let sourceUrl=null,parts=[],partUrls=[],busy=false,closed=false,cancelProcessing=null;
+const generate=button('✂ Gerar partes',process),cancel=button('Cancelar processamento',()=>cancelProcessing?.());cancel.hidden=true;form.append(generate,cancel);
+const upload=button('Enviar partes para esta IT',uploadParts);upload.disabled=true;dialog.append(message,output,upload);document.body.append(dialog);dialog.showModal();
+function clearParts(){partUrls.forEach(u=>URL.revokeObjectURL(u));partUrls=[];parts=[];output.replaceChildren();upload.disabled=true;}
+source.onchange=()=>{if(busy)return;clearParts();if(sourceUrl)URL.revokeObjectURL(sourceUrl);const file=source.files[0];if(!file)return;sourceUrl=URL.createObjectURL(file);preview.src=sourceUrl;message.textContent=`Original: ${(file.size/1024/1024).toFixed(1)} MB. Escolha o trecho e a qualidade.`;};
+preview.onloadedmetadata=()=>{if(Number.isFinite(preview.duration)){start.value='0';end.value=preview.duration.toFixed(1);}else message.textContent='Não foi possível determinar a duração. Escolha outro vídeo.';};
+function setBusy(value){busy=value;source.disabled=generate.disabled=quality.disabled=start.disabled=end.disabled=limit.disabled=value;cancel.hidden=!value;upload.disabled=value||!parts.length;}
+function displayParts(){output.replaceChildren();parts.forEach((p,i)=>{const row=el('div',null,'document-row');row.append(el('strong',`Parte ${i+1} · ${(p.blob.size/1024/1024).toFixed(1)} MB · ${p.start.toFixed(1)}–${p.end.toFixed(1)} s`));const url=URL.createObjectURL(p.blob);partUrls.push(url);row.append(button('▶ Conferir',()=>{const player=el('video');player.controls=true;player.src=url;player.style.width='100%';row.append(player);player.play().catch(()=>{});}),button('↓ Baixar parte',()=>{const a=el('a');a.href=url;a.download=`video-parte-${String(i+1).padStart(2,'0')}.${p.ext}`;document.body.append(a);a.click();a.remove();}));output.append(row);});}
+async function process(){
+if(!sourceUrl||!source.files[0]){message.textContent='Escolha um vídeo primeiro.';return;}
+const a=Number(start.value),b=Number(end.value),max=Number(limit.value);if(!Number.isFinite(a)||!Number.isFinite(b)||a<0||b<=a||b>preview.duration+.15||max<5||max>48){message.textContent='Confira o início, o fim e o limite entre 5 e 48 MB.';return;}
+if(!window.MediaRecorder||!HTMLCanvasElement.prototype.captureStream){message.textContent='Este navegador não suporta o editor. Use Chrome ou Edge atualizado no computador.';return;}
+const mime=['video/mp4;codecs=avc1.42E01E,mp4a.40.2','video/webm;codecs=vp8,opus','video/webm'].find(t=>MediaRecorder.isTypeSupported(t));if(!mime){message.textContent='Não há formato compatível para gerar o vídeo neste navegador.';return;}
+clearParts();setBusy(true);preview.pause();const result=[];
+const settings=quality.value.startsWith('720')?{height:720,bitrate:1500000}:quality.value.startsWith('480')?{height:480,bitrate:800000}:{height:360,bitrate:500000};
+try{
+await transcode(a,b,settings,mime,max,result);if(closed)return;parts=result;displayParts();message.textContent=`${parts.length} parte(s) prontas. Confira o vídeo e o áudio antes de enviar.`;
+}catch(e){if(!closed){clearParts();message.textContent=e.message||'Não foi possível preparar o vídeo.';}}
+finally{cancelProcessing=null;if(!closed)setBusy(false);}
+}
+async function transcode(a,b,settings,mime,max,result){
+const video=el('video');video.playsInline=true;video.preload='auto';video.src=sourceUrl;video.style.width='1px';video.style.height='1px';video.style.position='absolute';video.style.opacity='0';dialog.append(video);
+let audio=null,stream=null,raf=null,recorder=null,cancelled=false,resolveFinished,rejectFinished,cutting=false,partStart=a,lastTime=a;
+const finished=new Promise((resolve,reject)=>{resolveFinished=resolve;rejectFinished=reject;});finished.catch(()=>{});
+const stop=()=>{video.pause();if(recorder&&recorder.state!=='inactive')recorder.stop();};
+cancelProcessing=()=>{cancelled=true;stop();rejectFinished(Error('Processamento cancelado. Nenhuma parte foi enviada.'));};
+const visibility=()=>{if(document.hidden)cancelProcessing?.();};document.addEventListener('visibilitychange',visibility);
+try{
+await Promise.race([new Promise((resolve,reject)=>{video.onloadedmetadata=resolve;video.onerror=()=>reject(Error('O navegador não conseguiu abrir este vídeo. Converta o original para MP4 e tente novamente.'));video.load();}),finished]);if(cancelled)throw Error('Processamento cancelado.');video.onerror=()=>rejectFinished(Error('Falha ao reproduzir o vídeo original.'));
+const AudioClass=window.AudioContext||window.webkitAudioContext;if(!AudioClass)throw Error('Este navegador não suporta o processamento de áudio. Use Chrome ou Edge no computador.');
+audio=new AudioClass();await audio.resume();const input=audio.createMediaElementSource(video),destination=audio.createMediaStreamDestination(),silence=audio.createGain();silence.gain.value=0;input.connect(destination);input.connect(silence);silence.connect(audio.destination);
+const canvas=el('canvas');const height=Math.min(settings.height,video.videoHeight),ratio=video.videoWidth/video.videoHeight;if(!height||!Number.isFinite(ratio))throw Error('Dimensões do vídeo inválidas.');canvas.height=Math.max(2,Math.round(height/2)*2);canvas.width=Math.max(2,Math.round(canvas.height*ratio/2)*2);const ctx=canvas.getContext('2d');stream=canvas.captureStream(25);destination.stream.getAudioTracks().forEach(t=>stream.addTrack(t));
+if(a>0){await new Promise(resolve=>{video.onseeked=()=>{video.onseeked=null;resolve();};video.currentTime=a;});}
+const hardLimit=50*1024*1024,target=(max-2)*1024*1024;
+function begin(){let chunks=[],bytes=0;cutting=false;partStart=video.currentTime;
+recorder=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:settings.bitrate,audioBitsPerSecond:64000});
+recorder.ondataavailable=e=>{if(e.data.size){chunks.push(e.data);bytes+=e.data.size;}if(bytes>=target&&!cutting&&recorder.state==='recording'){cutting=true;stop();}};
+recorder.onerror=e=>rejectFinished(Error('Falha na conversão: '+(e.error?.message||'tente outra qualidade.')));
+recorder.onstop=()=>{if(cancelled)return;const blob=new Blob(chunks,{type:mime});if(blob.size>max*1024*1024||blob.size>hardLimit){cancelled=true;rejectFinished(Error('Uma parte ultrapassou o limite. Reduza a qualidade e gere novamente. Nenhuma parte foi enviada.'));return;}const partEnd=Math.min(video.currentTime,b);if(blob.size)result.push({blob,ext:mime.startsWith('video/mp4')?'mp4':'webm',start:partStart,end:partEnd,uploaded:false});if(partEnd>=b-.08||video.ended){resolveFinished();return;}begin();video.play().catch(rejectFinished);};recorder.start(500);
+}
+function frame(){if(cancelled)return;ctx.drawImage(video,0,0,canvas.width,canvas.height);lastTime=video.currentTime;message.textContent=`Preparando: ${Math.min(100,Math.round((lastTime-a)/(b-a)*100))}% · ${result.length} parte(s) concluídas`;if(lastTime>=b||video.ended){if(!cutting){cutting=true;stop();}return;}raf=requestAnimationFrame(frame);}
+ctx.drawImage(video,0,0,canvas.width,canvas.height);begin();video.onended=()=>{if(!cutting){cutting=true;stop();}};await video.play();raf=requestAnimationFrame(frame);await finished;
+}finally{cancelled=true;cancelAnimationFrame(raf);video.pause();if(recorder?.state==='recording')recorder.stop();stream?.getTracks().forEach(t=>t.stop());await audio?.close();video.removeAttribute('src');video.load();video.remove();document.removeEventListener('visibilitychange',visibility);}
+}
+async function uploadParts(){if(busy||!parts.length)return;setBusy(true);cancel.hidden=true;try{for(let i=0;i<parts.length;i++){const p=parts[i];if(p.uploaded)continue;if(p.blob.size>50*1024*1024)throw Error('Parte acima do limite. Gere novamente.');message.textContent=`Enviando parte ${i+1} de ${parts.length}…`;const path=`${crypto.randomUUID()}.${p.ext}`;checked(await db.storage.from('brasformer').upload(path,p.blob,{contentType:p.blob.type.split(';')[0],upsert:false}));const r=await db.from('documents').insert({title:`${doc.title} — Parte ${String(i+1).padStart(2,'0')}`,sector:doc.sector,operation:doc.operation,type:'video',file_path:path,folder_id:doc.folder_id||null,parent_it_id:doc.id,created_by:user.id});if(r.error){await db.storage.from('brasformer').remove([path]);throw r.error;}p.uploaded=true;}
+message.textContent='Todas as partes foram vinculadas à IT.';await afterUpload();}catch(e){message.textContent='Falha no envio: '+e.message+' Clique novamente para enviar somente as partes restantes.';}finally{if(!closed){setBusy(false);upload.disabled=parts.every(p=>p.uploaded);}}}
+dialog.addEventListener('cancel',e=>{if(busy&&!cancelProcessing)e.preventDefault();});
+dialog.onclose=()=>{if(busy&&cancelProcessing)cancelProcessing();closed=true;preview.pause();if(sourceUrl)URL.revokeObjectURL(sourceUrl);partUrls.forEach(u=>URL.revokeObjectURL(u));dialog.remove();};
+}
+
 function itVideoTools(dialog,doc){
 const area=el('section');area.append(el('h4','Vídeo da operação'));const videos=el('div'),msg=el('p');msg.setAttribute('role','status');area.append(videos,msg);dialog.append(area);
 async function reload(){try{const items=checked(await db.from('documents').select('*').eq('parent_it_id',doc.id).order('created_at'));videos.replaceChildren();if(!items.length)videos.append(el('p','Nenhum vídeo vinculado a esta IT.'));items.forEach(v=>{const row=el('div',null,'document-row');row.append(button('▶ Assistir vídeo da operação',()=>showDocument(v)),el('span',v.title));if(admin())row.append(button('Excluir vídeo',async()=>{if(!confirm('Excluir este vídeo da IT?'))return;try{await deleteDocument(v);await reload();}catch(e){msg.textContent=e.message;}},'danger'));videos.append(row);});}catch(e){msg.textContent=e.message;}}
@@ -153,7 +212,7 @@ if(admin()){
 const form=el('form',null,'admin-form'),label=el('label','Adicionar vídeo a esta IT (MP4/WebM, até 50 MB)'),file=el('input');file.type='file';file.accept='.mp4,.webm';file.required=true;label.append(file);const submit=el('button','Enviar vídeo para esta IT','action');submit.type='submit';form.append(label,submit);area.append(form);
 form.onsubmit=async e=>{e.preventDefault();submit.disabled=true;msg.textContent='Enviando vídeo…';let path;try{const f=file.files[0],ext=f?.name.split('.').pop().toLowerCase();if(!f||!['mp4','webm'].includes(ext)||f.size>50*1024*1024)throw Error('Escolha um vídeo MP4/WebM de até 50 MB.');path=`${crypto.randomUUID()}.${ext}`;checked(await db.storage.from('brasformer').upload(path,f,{upsert:false}));const r=await db.from('documents').insert({title:f.name,sector:doc.sector,operation:doc.operation,type:'video',file_path:path,folder_id:doc.folder_id||null,parent_it_id:doc.id,created_by:user.id});if(r.error){await db.storage.from('brasformer').remove([path]);throw r.error;}file.value='';msg.textContent='Vídeo vinculado à IT.';await reload();}catch(err){msg.textContent=err.message;}finally{submit.disabled=false;}};
 area.append(button('Vincular vídeo já cadastrado',async()=>{try{const available=checked(await db.from('documents').select('*').eq('type','video').is('parent_it_id',null).order('title'));if(!available.length){msg.textContent='Não há vídeos separados disponíveis.';return;}const chooser=el('div',null,'admin-form'),select=el('select');select.setAttribute('aria-label','Vídeo já cadastrado');available.forEach(v=>{const o=el('option',v.title);o.value=v.id;select.append(o);});chooser.append(select,button('Vincular à IT',async()=>{try{checked(await db.from('documents').update({parent_it_id:doc.id,folder_id:doc.folder_id||null,sector:doc.sector,operation:doc.operation}).eq('id',select.value));chooser.remove();msg.textContent='Vídeo vinculado. Ele ficará dentro da IT.';await reload();}catch(e){msg.textContent=e.message;}}),button('Cancelar',()=>chooser.remove()));area.append(chooser);}catch(e){msg.textContent=e.message;}}));
-}reload();
+}if(admin())area.append(button('✂ Reduzir / dividir vídeo grande',()=>videoEditor(doc,reload)));reload();
 }
 
 let pdfLibraryPromise;

@@ -89,14 +89,15 @@ select.value=selected||'';
 }
 function explorer(host,uploadSelect=null){
 const owner=user.id,version=viewVersion;
-let folders=[],docs=[],favorites=new Set(),currentFolder=null,loadVersion=0;
+let folders=[],docs=[],favorites=new Set(),currentFolder=null,loadVersion=0,viewMode='icons';
 const valid=()=>version===viewVersion&&user?.id===owner;
-const box=el('section');box.setAttribute('aria-label','Explorador de arquivos');
-box.append(el('h3','Explorador de arquivos'));
-const toolbar=el('div',null,'document-row'),crumbs=el('nav'),status=el('p'),list=el('div');
+const launcher=button('📂 Abrir explorador de arquivos',()=>{box.hidden=!box.hidden;launcher.setAttribute('aria-expanded',String(!box.hidden));});launcher.className='explorer-launch';launcher.setAttribute('aria-expanded','false');host.append(launcher);
+const box=el('section',null,'windows-explorer');box.hidden=true;box.setAttribute('aria-label','Explorador de arquivos');
+const titlebar=el('div',null,'explorer-titlebar');titlebar.append(el('h3','📂 Explorador de arquivos'),button('Fechar',()=>{box.hidden=true;launcher.setAttribute('aria-expanded','false');launcher.focus();}));box.append(titlebar);
+const toolbar=el('div',null,'explorer-toolbar'),crumbs=el('nav',null,'explorer-breadcrumbs'),status=el('p',null,'explorer-status'),list=el('div',null,'explorer-items');
 crumbs.setAttribute('aria-label','Caminho da pasta');status.setAttribute('role','status');
 const search=el('input');search.placeholder='Buscar pasta ou documento em todo o explorador';search.setAttribute('aria-label','Buscar no explorador');search.style.width='100%';
-box.append(toolbar,crumbs,search,status,list);host.append(box);
+const addressbar=el('div',null,'explorer-addressbar'),workspace=el('div',null,'explorer-workspace'),tree=el('aside',null,'explorer-tree'),pane=el('div',null,'explorer-pane'),count=el('p',null,'explorer-count');tree.setAttribute('aria-label','Árvore de pastas');addressbar.append(crumbs,search);pane.append(list);workspace.append(tree,pane);box.append(toolbar,addressbar,status,workspace,count);host.append(box);
 const notify=e=>{if(valid())status.textContent=e.code==='23505'?'Já existe uma pasta com esse nome neste local.':e.code==='23503'?'A pasta contém arquivos ou subpastas. Mova o conteúdo antes de excluir.':(e.message||'Não foi possível concluir a ação.');};
 async function load(){const request=++loadVersion;try{
 const results=await Promise.all([db.from('document_folders').select('*').order('name'),db.from('documents').select('*').order('title'),db.from('document_favorites').select('document_id').eq('user_id',owner)]);
@@ -116,20 +117,25 @@ const save=el('button','Mover arquivo','action');save.type='submit';const msg=el
 dialog.append(el('h3',`Mover: ${doc.title}`),form);document.body.append(dialog);dialog.onclose=()=>dialog.remove();
 form.onsubmit=async e=>{e.preventDefault();save.disabled=true;try{checked(await db.from('documents').update({folder_id:select.value||null}).eq('id',doc.id));dialog.close();if(valid()){status.textContent='Arquivo movido.';await load();}}catch(err){msg.textContent=err.message||'Não foi possível mover.';save.disabled=false;}};dialog.showModal();
 }
-function render(){if(!valid())return;toolbar.replaceChildren();crumbs.replaceChildren();list.replaceChildren();
+function render(){if(!valid())return;toolbar.replaceChildren();crumbs.replaceChildren();list.replaceChildren();tree.replaceChildren();
+list.className='explorer-items '+(viewMode==='icons'?'explorer-icons':'explorer-details');
+const ancestors=new Set();let parent=currentFolder;while(parent&&!ancestors.has(parent)){ancestors.add(parent);parent=folders.find(f=>f.id===parent)?.parent_id;}
+const rootButton=button('📂 Todas as pastas',()=>navigate(null),'tree-folder');rootButton.setAttribute('aria-current',String(!currentFolder));tree.append(rootButton);
+function branch(parentId,host,seen){folders.filter(f=>f.parent_id===parentId).forEach(f=>{if(seen.has(f.id))return;const children=folders.some(c=>c.parent_id===f.id);const entry=el('div',null,'tree-entry'),folderButton=button('📁 '+f.name,()=>navigate(f.id),'tree-folder');folderButton.setAttribute('aria-current',String(f.id===currentFolder));if(children){const group=el('details'),summary=el('summary');group.open=ancestors.has(f.id);summary.append(folderButton);group.append(summary);branch(f.id,group,new Set([...seen,f.id]));entry.append(group);}else entry.append(folderButton);host.append(entry);});}branch(null,tree,new Set());
+const up=button('↑ Pasta acima',()=>navigate(folders.find(f=>f.id===currentFolder)?.parent_id||null));up.disabled=!currentFolder;toolbar.append(up);
 if(admin()){
 toolbar.append(button('＋ Nova pasta raiz',()=>createFolder(null)));
 if(currentFolder)toolbar.append(button('＋ Nova subpasta',()=>createFolder(currentFolder)));
 if(uploadSelect)toolbar.append(button('Enviar arquivo aqui',()=>{uploadSelect.value=currentFolder||'';uploadSelect.scrollIntoView({behavior:'smooth',block:'center'});uploadSelect.focus();}));
 }
-toolbar.append(button('Atualizar pastas',()=>load()));
+toolbar.append(button('↻ Atualizar',()=>load()));const viewButton=button(viewMode==='icons'?'☷ Detalhes':'▦ Ícones',()=>{viewMode=viewMode==='icons'?'details':'icons';render();});toolbar.append(viewButton);
 crumbs.append(button('Todas as pastas',()=>navigate(null)));
 if(currentFolder){const chain=[],seen=new Set();let id=currentFolder;while(id&&!seen.has(id)){seen.add(id);const f=folders.find(x=>x.id===id);if(!f)break;chain.unshift(f);id=f.parent_id;}chain.forEach(f=>{crumbs.append(el('span',' / '),button(f.name,()=>navigate(f.id)));});}
 const query=search.value.trim().toLocaleLowerCase('pt-BR');
 const matches=text=>text.toLocaleLowerCase('pt-BR').includes(query);
 const visibleFolders=folders.filter(f=>query?matches(folderPath(folders,f.id)):f.parent_id===currentFolder);
 visibleFolders.forEach(f=>{
-const row=el('div',null,'document-row');row.append(button(`📁 ${f.name}`,()=>navigate(f.id)),el('span',query?folderPath(folders,f.id):'Pasta'));
+const row=el('div',null,'explorer-item folder-item'),open=button('',()=>navigate(f.id),'explorer-open');open.setAttribute('aria-label','Abrir pasta: '+f.name);open.append(el('span','📁','file-icon'),el('strong',f.name));row.append(open,el('span',query?folderPath(folders,f.id):`${folders.filter(x=>x.parent_id===f.id).length} subpastas · ${docs.filter(d=>d.folder_id===f.id).length} arquivos`,'file-meta'));
 if(admin()){
 row.append(button('Renomear pasta',async()=>{const name=prompt('Novo nome da pasta:',f.name);if(name===null)return;const clean=name.trim();if(!clean||clean.length>120||/[\\/]/.test(clean)){status.textContent='Nome inválido.';return;}try{checked(await db.from('document_folders').update({name:clean}).eq('id',f.id));status.textContent='Pasta renomeada.';await load();}catch(e){notify(e);}}));
 const hasContent=folders.some(x=>x.parent_id===f.id)||docs.some(d=>d.folder_id===f.id);
@@ -137,10 +143,11 @@ const remove=button('Excluir pasta vazia',async()=>{if(!confirm(`Excluir a pasta
 }list.append(row);});
 const visibleDocs=docs.filter(d=>query?matches(`${d.title} ${folderPath(folders,d.folder_id)} ${d.sector} ${d.operation}`):(d.folder_id||null)===currentFolder);
 visibleDocs.forEach(d=>{
-const row=el('div',null,'document-row');row.append(el('strong',d.title),el('span',`${d.type} · ${d.sector} · ${d.operation}${query?' · '+(folderPath(folders,d.folder_id)||'Sem pasta'):''}`),button('Visualizar',()=>showDocument(d)));
+const row=el('div',null,'explorer-item file-item'),open=button('',()=>showDocument(d),'explorer-open');open.setAttribute('aria-label','Visualizar: '+d.title);open.append(el('span',d.type==='video'?'🎬':d.type==='desenho'?'🖼':'📄','file-icon'),el('strong',d.title));row.append(open,el('span',`${d.type==='it'?'IT':d.type==='video'?'Vídeo':'Desenho'} · ${d.sector} · ${d.operation}${query?' · '+(folderPath(folders,d.folder_id)||'Sem pasta'):''}`,'file-meta'));
 const star=button(favorites.has(d.id)?'★ Favoritado':'☆ Favoritar',async()=>{star.disabled=true;try{const remove=favorites.has(d.id);checked(remove?await db.from('document_favorites').delete().eq('user_id',owner).eq('document_id',d.id):await db.from('document_favorites').upsert({user_id:owner,document_id:d.id},{onConflict:'user_id,document_id',ignoreDuplicates:true}));if(valid()){if(remove)favorites.delete(d.id);else favorites.add(d.id);status.textContent=remove?'Favorito removido.':'Favorito salvo.';render();}}catch(e){notify(e);star.disabled=false;}});star.setAttribute('aria-pressed',String(favorites.has(d.id)));star.setAttribute('aria-label',`${favorites.has(d.id)?'Remover dos favoritos':'Favoritar'}: ${d.title}`);row.append(star);
 if(admin())row.append(button('Mover arquivo',()=>moveDocument(d)));list.append(row);
 });
+count.textContent=`${visibleFolders.length} pastas · ${visibleDocs.length} arquivos`;
 if(!visibleFolders.length&&!visibleDocs.length)list.append(el('p',query?'Nenhum resultado encontrado.':currentFolder?'Esta pasta está vazia.':'Nenhuma pasta ou arquivo sem pasta. Crie uma pasta raiz para começar.','empty'));
 }
 search.oninput=render;load();return {refresh:load};

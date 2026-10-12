@@ -19,8 +19,8 @@ let input,sectorFilter,typeFilter,operationFilter;
 if(screen==='search'||screen==='mine'){
 input=el('input');input.placeholder='Buscar pelo título, setor ou operação';input.setAttribute('aria-label','Buscar documentos');filters.append(input);
 }
-if(screen==='mine'){
-heading.textContent='Meus favoritos';
+if(screen==='mine'||screen==='search'){
+if(screen==='mine')heading.textContent='Meus favoritos';
 sectorFilter=field(filters,'Setor','sector','text',['Todos os setores']);
 operationFilter=field(filters,'Operação','operation','text',['Todas as operações']);
 typeFilter=field(filters,'Tipo','type','text',['Todos os tipos','it','desenho','video']);
@@ -37,20 +37,26 @@ const results=await Promise.all([q,db.from('document_favorites').select('documen
 const docs=checked(results[0]);
 const favorites=new Set(checked(results[1]).map(f=>f.document_id));
 if(version!==viewVersion||user?.id!==owner)return;
-if(screen==='mine'){
+if(screen==='mine'||screen==='search'){
 const addOptions=(target,values)=>values.forEach(v=>{const o=el('option',v);o.value=v;target.append(o);});
-const favoriteDocs=docs.filter(d=>favorites.has(d.id));
+const favoriteDocs=screen==='mine'?docs.filter(d=>favorites.has(d.id)):docs;
 addOptions(sectorFilter,[...new Set(favoriteDocs.map(d=>d.sector))].sort());
 addOptions(operationFilter,[...new Set(favoriteDocs.map(d=>d.operation))].sort());
 }
 const render=()=>{
 if(version!==viewVersion||user?.id!==owner)return;
 list.replaceChildren();
+const textQuery=input?.value.trim()||'';
+const hasFilters=textQuery||(sectorFilter&&sectorFilter.value!=='Todos os setores')||(operationFilter&&operationFilter.value!=='Todas as operações')||(typeFilter&&typeFilter.value!=='Todos os tipos');
+if(screen==='search'&&!hasFilters){status.textContent='';return;}
+const normalize=text=>String(text).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLocaleLowerCase('pt-BR');
+const terms=normalize(textQuery).split(/\s+/).filter(Boolean);
 const filtered=docs.filter(d=>(screen!=='mine'||favorites.has(d.id))&&
-(!input||`${d.title} ${d.sector} ${d.operation}`.toLocaleLowerCase('pt-BR').includes(input.value.toLocaleLowerCase('pt-BR')))&&
+(!input||terms.every(term=>normalize(`${d.title} ${d.sector} ${d.operation}`).includes(term)))&&
 (!sectorFilter||sectorFilter.value==='Todos os setores'||d.sector===sectorFilter.value)&&
 (!operationFilter||operationFilter.value==='Todas as operações'||d.operation===operationFilter.value)&&
 (!typeFilter||typeFilter.value==='Todos os tipos'||d.type===typeFilter.value));
+if(screen==='search')status.textContent=`${filtered.length} documento(s) encontrado(s).`;
 if(!filtered.length)list.append(el('p',screen==='mine'?(favorites.size?'Nenhum favorito corresponde aos filtros.':'Você ainda não tem favoritos. Abra Setores ou Buscar e clique em ☆ Favoritar.'):'Nenhum documento encontrado.','empty'));
 filtered.forEach(d=>{
 const row=el('div',null,'document-row');
